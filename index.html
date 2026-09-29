@@ -292,7 +292,7 @@ const TASK_SRC={assigned:{l:'組長指派',k:'info'},claimed:{l:'自願認領',k
 const isVoluntary=t=>t.source==='claimed'||t.source==='self';
 const taskKind=t=>!t.staffId||!S.staff[t.staffId]?'pool':isVoluntary(t)?'vol':'assigned';
 const CATS_DEFAULT=[{id:'init',name:'住院初評'},{id:'follow',name:'住院複評'},{id:'opd',name:'門診諮詢'},{id:'consult',name:'會診'},{id:'edu',name:'團體衛教'},{id:'other',name:'其他'}];
-const VIEWS=[['dash','戰情室'],['tasks','任務'],['att','出勤'],['vol','業務量'],['stats','統計報表'],['ach','工作成就'],['set','人員與設定']];
+const VIEWS=[['dash','戰情室'],['tasks','任務'],['att','出勤'],['vol','業務量'],['stats','統計報表'],['ana','任務分析'],['ach','工作成就'],['set','人員與設定']];
 
 /* ---------- 狀態 ---------- */
 const store={get(k){try{return localStorage.getItem(k)}catch(e){return null}},set(k,v){try{localStorage.setItem(k,v)}catch(e){}}};
@@ -301,7 +301,7 @@ const S={
   staff:{},tasks:{},months:{},atts:{},roles:{},myRole:null,leaves:{},notices:{},auth:'loading',authEmail:'',cats:CATS_DEFAULT,
   me:{uid:null,email:'',owner:false,known:false},
   view:'dash',dashDate:TODAY,attMonth:TODAY.slice(0,7),volDate:TODAY,
-  rp:'month',rFrom:'',rTo:'',tf:{who:'all',st:'open',q:'',srcs:{assigned:true,vol:true,pool:true}},tfInit:false
+  rp:'month',rFrom:'',rTo:'',an:{task:'',who:'',rp:'all',from:'',to:''},tf:{who:'all',st:'open',q:'',srcs:{assigned:true,vol:true,pool:true}},tfInit:false
 };
 {const h=location.hash.slice(1),v=store.get('dn.view');const ok=x=>VIEWS.some(([k])=>k===x);S.view=ok(h)?h:ok(v)?v:'dash';}
 let db=null,auth=null;
@@ -509,7 +509,17 @@ function cancelLeave(id){
 }
 const pendingLeaves=()=>Object.values(S.leaves).filter(l=>l.status==='pending'&&S.staff[l.staffId]).sort((a,b)=>a.from<b.from?-1:1);
 const deciderName=v=>v==='director'?'主任':v?staffName(v):'';
+/* 負責人歷程：每次換負責人就結束前一段、開始新一段，供「任務分析」統計 */
+function nextOwners(prev,t){
+  let own=Array.isArray(prev?.owners)?prev.owners.map(o=>({...o})):(prev&&prev.staffId?[{staffId:prev.staffId,from:prev.start||prev.created||TODAY,to:''}]:[]);
+  const was=prev?.staffId||'',now=t.staffId||'';
+  if(was===now){if(!own.length&&now)own=[{staffId:now,from:t.start||TODAY,to:''}];return own}
+  if(own.length&&!own[own.length-1].to)own[own.length-1].to=TODAY;
+  if(now)own.push({staffId:now,from:prev?TODAY:(t.start||TODAY),to:''});
+  return own;
+}
 function saveTask(t){
+  t={...t,owners:nextOwners(S.tasks[t.id],t)};
   const {id,...body}=t;S.tasks={...S.tasks,[id]:t};
   if(db)enqueue('tasks/'+id,()=>db.doc('tasks/'+id).set(body));
 }
@@ -748,7 +758,7 @@ function openTask(id,preset={}){
     <label class="full">內容說明／備註<textarea class="field" id="f_note" rows="2" maxlength="500" ${d}>${esc(t.note||'')}</textarea></label>
     <label class="full">成果說明（完成後填寫，例如：研討會發表、衛教講座場次與人數、媒體露出）<textarea class="field" id="f_outcome" rows="2" maxlength="500" ${d}>${esc(t.outcome||'')}</textarea></label>
   </form>
-  <div class="actions">${id&&can&&P.delTask(t)?`<button class="btn danger" data-act="delTask" data-id="${id}">刪除</button>`:''}<span class="grow"></span>
+  <div class="actions">${id&&can&&P.delTask(t)?`<button class="btn danger" data-act="delTask" data-id="${id}">刪除</button>`:''}${id?`<button class="btn" data-act="anaFromTask" data-id="${id}">看此任務統計</button>`:''}<span class="grow"></span>
   <button class="btn" data-act="closeModal">${can?'取消':'關閉'}</button>${id&&P.claim(t)&&S.canWrite?`<button class="btn pri" data-act="claim" data-id="${id}">我來接</button>`:''}${can?`<button class="btn pri" type="submit" form="taskForm">儲存</button>`:''}</div></div>`;
   modal.hidden=false;
   $('f_status').addEventListener('change',e=>{const v=e.target.value;if(v==='done'){if(!$('f_done').value)$('f_done').value=TODAY;$('f_prog').value=100}else if(+$('f_prog').value===100)$('f_prog').value=90;$('f_pv').textContent=$('f_prog').value+'%'});
@@ -960,6 +970,94 @@ async function exportCsv(){
   catch(e){if(e?.code==='declined')return;if(e?.code==='rate_limited')toast('請稍候再試');else toast('此環境無法下載檔案')}
 }
 
+/* ---------- 任務分析 ----------
+   同名任務視為同一「任務項目」的多次執行；每一段負責期間（owners）算一次執行。 */
+const normTitle=t=>String(t||'').trim();
+function segmentsOf(t){
+  const own=Array.isArray(t.owners)&&t.owners.length?t.owners:(t.staffId?[{staffId:t.staffId,from:t.start||t.created||TODAY,to:''}]:[]);
+  return own.filter(o=>o.staffId).map((o,i,arr)=>{
+    const last=i===arr.length-1,from=o.from||t.start||t.created||TODAY;
+    let state,end;
+    if(last&&t.status==='done'&&o.staffId===t.staffId){state='done';end=t.doneDate||o.to||TODAY}
+    else if(o.to){state='transferred';end=o.to}
+    else{state='open';end=TODAY}
+    if(end<from)end=from;
+    return{task:t,title:normTitle(t.title),cat:t.cat||'',staffId:o.staffId,from,end,state,
+      ontime:state==='done'&&(!t.due||end<=t.due),late:state==='open'&&t.due&&t.due<TODAY,full:daysBetween(from,end)+1};
+  });
+}
+function anaData(){
+  const {task,who,from,to}=S.an;
+  let segs=tasksArr().flatMap(segmentsOf);
+  if(from)segs=segs.filter(x=>x.end>=from);
+  if(to)segs=segs.filter(x=>x.from<=to);
+  segs.forEach(x=>{const a=from&&x.from<from?from:x.from,b=to&&x.end>to?to:x.end;x.days=b<a?0:daysBetween(a,b)+1});
+  return{all:segs,scoped:segs.filter(x=>(!task||x.title===task)&&(!who||x.staffId===who))};
+}
+function anaAgg(list){
+  const done=list.filter(x=>x.state==='done'),n=list.length;
+  return{n,done:done.length,open:list.filter(x=>x.state==='open').length,tr:list.filter(x=>x.state==='transferred').length,
+    late:list.filter(x=>x.late).length,ontime:done.filter(x=>x.ontime).length,days:list.reduce((a,x)=>a+x.days,0),
+    avg:done.length?Math.round(done.reduce((a,x)=>a+x.full,0)/done.length*10)/10:null,
+    first:list.reduce((a,x)=>!a||x.from<a?x.from:a,''),last:list.reduce((a,x)=>!a||x.end>a?x.end:a,''),
+    people:new Set(list.map(x=>x.staffId)).size};
+}
+const pct=(a,b)=>b?Math.round(a/b*100):null;
+const rateCell=(a,b)=>{const p=pct(a,b);return p===null?'<span class="zero">–</span>':`<div style="display:flex;align-items:center;gap:8px;justify-content:flex-end"><span class="prog" style="margin:0;width:56px"><i style="width:${p}%"></i></span><b>${p}%</b></div>`};
+const span=(a,b)=>a?`${mdy(a)}${b&&b!==a?' – '+mdy(b):''}`:'—';
+function anaPresetRange(p){if(p==='all')return['',''];return preset(p)}
+function vAna(){
+  const A=S.an,D=anaData(),g=anaAgg(D.scoped);
+  const titles=[...new Set(tasksArr().map(t=>normTitle(t.title)).filter(Boolean))].sort((a,b)=>a.localeCompare(b,'zh-Hant'));
+  const cnt=Object.fromEntries(titles.map(x=>[x,0]));tasksArr().forEach(t=>{const k=normTitle(t.title);if(k in cnt)cnt[k]++});
+  const presets=[['all','全部期間'],['year','今年'],['quarter','本季'],['month','本月'],['lastmonth','上月']];
+  let h=`<div class="bar">
+    <select class="field" id="anaTaskSel" data-chg="anaTaskSel" aria-label="任務項目" style="max-width:20em"><option value="">全部任務項目</option>${titles.map(x=>`<option value="${esc(x)}" ${A.task===x?'selected':''}>${esc(x)}${cnt[x]>1?`（${cnt[x]} 次）`:''}</option>`).join('')}</select>
+    <select class="field" id="anaWhoSel" data-chg="anaWhoSel" aria-label="負責人"><option value="">全部負責人</option>${staffList().map(s=>`<option value="${s.id}" ${A.who===s.id?'selected':''}>${esc(s.name)}${s.until&&s.until<TODAY?'（已離職）':''}</option>`).join('')}</select>
+    <div class="seg" role="group" aria-label="期間">${presets.map(([k,l])=>`<button data-act="anaPreset" data-v="${k}" aria-pressed="${A.rp===k}">${l}</button>`).join('')}</div>
+    <input type="date" class="field" id="anaFrom" data-chg="anaFrom" value="${A.from}" aria-label="起日"><span class="muted">至</span><input type="date" class="field" id="anaTo" data-chg="anaTo" value="${A.to}" aria-label="迄日">
+    <span class="grow"></span>${A.task||A.who||A.rp!=='all'?`<button class="btn" data-act="anaClear">清除篩選</button>`:''}<button class="btn" data-act="exportAna">匯出 CSV</button></div>`;
+  if(A.from&&A.to&&A.from>A.to)return h+`<div class="panel empty">起日晚於迄日，請重新選擇期間。</div>`;
+  const scopeTxt=[A.task?`「${esc(A.task)}」`:'所有任務',A.who?esc(staffName(A.who)):'所有人',A.from||A.to?`${A.from?mdy(A.from):'最早'} – ${A.to?mdy(A.to):'今天'}`:'全部期間'].join('・');
+  h+=`<p class="note" style="margin:0">目前範圍：<b style="color:var(--ink)">${scopeTxt}</b>。點下方表格任一列可再往下看；同名任務視為同一項目的多次執行，中途換人會分成兩次執行（前一次記為「轉交」）。</p>`;
+  h+=`<div class="kpis">
+    ${kpi('執行次數',`${g.n}<small>次</small>`,`${g.people} 位負責人${A.task?'':`・${new Set(D.scoped.map(x=>x.title)).size} 個任務項目`}`)}
+    ${kpi('完成率',g.n?`${pct(g.done,g.n)}<small>%</small>`:'—',`完成 ${g.done}・進行中 ${g.open}・轉交 ${g.tr}`)}
+    ${kpi('準時完成率',g.done?`${pct(g.ontime,g.done)}<small>%</small>`:'—',g.done?`準時 ${g.ontime} / 完成 ${g.done}`:'尚無完成紀錄')}
+    ${kpi('投入總天數',`${g.days}<small>天</small>`,A.from||A.to?'僅計算期間內的天數':'各次執行開始到完成（或今天）')}
+    ${kpi('平均完成天數',g.avg!==null?`${nf(g.avg)}<small>天</small>`:'—',g.late?`<span class="bad">進行中且逾期 ${g.late} 次</span>`:'已完成者從開始到完成')}
+  </div>`;
+  if(!D.scoped.length)return h+`<div class="panel empty">這個範圍內沒有任務紀錄。</div>`;
+  if(!A.who){
+    const by={};D.scoped.forEach(x=>(by[x.staffId]||=[]).push(x));
+    const rows=Object.entries(by).map(([sid,l])=>({sid,a:anaAgg(l)})).sort((a,b)=>b.a.n-a.a.n);
+    h+=`<section class="panel"><div class="ph"><h2>依負責人</h2><span class="hint">${A.task?'曾負責這項任務的所有人':'點姓名只看這個人'}</span></div><div class="scroll"><table class="tbl"><thead><tr><th>負責人</th><th class="num">執行次數</th><th class="num">完成</th><th class="num">進行中</th><th class="num">轉交</th><th class="num">完成率</th><th class="num">準時率</th><th class="num">總天數</th><th class="num">平均完成天數</th><th>負責期間</th></tr></thead><tbody>`;
+    h+=rows.map(({sid,a})=>`<tr class="click" data-act="anaWho" data-s="${sid}"><td><b>${esc(staffName(sid))}</b>${S.staff[sid]?.until&&S.staff[sid].until<TODAY?' <span class="small muted">已離職</span>':''}</td><td class="num"><b>${a.n}</b></td><td class="num">${a.done}</td><td class="num">${a.open}${a.late?` <span class="bad small">逾期${a.late}</span>`:''}</td><td class="num">${a.tr||'<span class="zero">0</span>'}</td><td class="num">${rateCell(a.done,a.n)}</td><td class="num">${a.done?pct(a.ontime,a.done)+'%':'–'}</td><td class="num">${a.days}</td><td class="num">${a.avg!==null?nf(a.avg):'–'}</td><td class="small" style="white-space:nowrap">${span(a.first,a.last)}</td></tr>`).join('');
+    h+=`</tbody></table></div></section>`;
+  }
+  if(!A.task){
+    const by={};D.scoped.forEach(x=>(by[x.title]||=[]).push(x));
+    const rows=Object.entries(by).map(([k,l])=>({k,cat:l[0].cat,a:anaAgg(l)})).sort((a,b)=>b.a.n-a.a.n||(a.a.last<b.a.last?1:-1));
+    h+=`<section class="panel"><div class="ph"><h2>依任務項目</h2><span class="hint">${A.who?`${esc(staffName(A.who))} 做過的任務`:'點任務名稱只看這一項'}</span></div><div class="scroll"><table class="tbl"><thead><tr><th>任務項目</th><th>類別</th><th class="num">執行次數</th><th class="num">負責人數</th><th class="num">完成率</th><th class="num">準時率</th><th class="num">總天數</th><th class="num">平均完成天數</th><th>期間</th></tr></thead><tbody>`;
+    h+=rows.map(({k,cat,a})=>`<tr class="click" data-act="anaTask" data-t="${esc(k)}"><td><b>${esc(k)}</b></td><td class="small">${esc(cat)}</td><td class="num"><b>${a.n}</b></td><td class="num">${a.people}</td><td class="num">${rateCell(a.done,a.n)}</td><td class="num">${a.done?pct(a.ontime,a.done)+'%':'–'}</td><td class="num">${a.days}</td><td class="num">${a.avg!==null?nf(a.avg):'–'}</td><td class="small" style="white-space:nowrap">${span(a.first,a.last)}</td></tr>`).join('');
+    h+=`</tbody></table></div></section>`;
+  }
+  const ST={done:['完成','ok'],open:['進行中','warn'],transferred:['轉交','off']};
+  const list=[...D.scoped].sort((a,b)=>a.from<b.from?1:-1);
+  h+=`<section class="panel"><div class="ph"><h2>執行紀錄</h2><span class="hint">${list.length} 次，依開始日由近到遠</span></div><div class="scroll"><table class="tbl"><thead><tr><th>任務</th><th>負責人</th><th>期間</th><th class="num">天數</th><th>結果</th></tr></thead><tbody>`;
+  h+=list.map(x=>{const st=ST[x.state];return `<tr class="click" data-act="task" data-id="${x.task.id}"><td>${esc(x.title)}${x.task.demo?'<span class="demo">示範</span>':''}</td><td style="white-space:nowrap">${esc(staffName(x.staffId))}</td><td class="small" style="white-space:nowrap">${mdy(x.from)} – ${x.state==='open'?'進行中':mdy(x.end)}</td><td class="num">${x.full}</td><td style="white-space:nowrap"><span class="chip k-${st[1]}">${st[0]}</span>${x.state==='done'?(x.ontime?' <span class="small" style="color:var(--ok)">準時</span>':' <span class="small bad">逾期完成</span>'):x.late?' <span class="small bad">已逾期</span>':''}</td></tr>`}).join('');
+  h+=`</tbody></table></div></section>`;
+  return h;
+}
+async function exportAna(){
+  const D=anaData(),A=S.an;
+  const q=v=>{v=String(v??'');return /[",\r\n]/.test(v)?`"${v.replace(/"/g,'""')}"`:v};
+  const ST={done:'完成',open:'進行中',transferred:'轉交'};
+  const rows=[[`任務分析 ${A.task||'全部任務'} / ${A.who?staffName(A.who):'全部負責人'} / ${A.from||'最早'} 至 ${A.to||'今天'}`],[],['任務','類別','負責人','開始','結束','天數','結果','準時']];
+  for(const x of D.scoped)rows.push([x.title,x.cat,staffName(x.staffId),x.from,x.state==='open'?'':x.end,x.full,ST[x.state],x.state==='done'?(x.ontime?'是':'否'):'']);
+  try{await downloads.save({filename:`任務分析_${TODAY}.csv`,data:'﻿'+rows.map(r=>r.map(q).join(',')).join('\r\n')});toast('已匯出')}catch(e){toast('無法下載檔案')}
+}
+
 /* ---------- 工作成就 ---------- */
 function rangeBar(exportAct){
   const presets=[['week','本週'],['lastweek','上週'],['month','本月'],['lastmonth','上月'],['quarter','本季'],['year','今年']];
@@ -1105,6 +1203,12 @@ const ACT={
   preset:t=>{S.rp=t.dataset.v;[S.rFrom,S.rTo]=preset(S.rp);render()},
   export:()=>exportCsv(),
   exportAch:()=>exportAch(),
+  exportAna:()=>exportAna(),
+  anaTask:t=>{S.an={...S.an,task:t.dataset.t};render();window.scrollTo({top:0})},
+  anaWho:t=>{S.an={...S.an,who:t.dataset.s};render();window.scrollTo({top:0})},
+  anaPreset:t=>{const [f,to]=anaPresetRange(t.dataset.v);S.an={...S.an,rp:t.dataset.v,from:f,to};render()},
+  anaClear:()=>{S.an={task:'',who:'',rp:'all',from:'',to:''};render()},
+  anaFromTask:t=>{const x=S.tasks[t.dataset.id];if(!x)return;closeModal();S.an={task:normTitle(x.title),who:'',rp:'all',from:'',to:''};go('ana')},
   seed:t=>{if(!S.me.owner||staffList().length)return;seedAll()},
   resyncRoles:()=>{if(P.manage())resyncRoles()},
   logout:()=>{auth&&auth.signOut();try{localStorage.removeItem('dn.email')}catch(e){}},
@@ -1143,6 +1247,10 @@ const CHG={
   rTo:t=>{if(t.value){S.rTo=t.value;S.rp='custom';render()}},
   tfWho:t=>{S.tf.who=t.value;render()},
   tfSrcBox:t=>{S.tf.srcs={...S.tf.srcs,[t.dataset.k]:t.checked};render()},
+  anaTaskSel:t=>{S.an={...S.an,task:t.value};render()},
+  anaWhoSel:t=>{S.an={...S.an,who:t.value};render()},
+  anaFrom:t=>{S.an={...S.an,from:t.value,rp:'custom'};render()},
+  anaTo:t=>{S.an={...S.an,to:t.value,rp:'custom'};render()},
   vol:t=>{if(!P.volRow(t.dataset.s))return;const n=Math.max(0,Math.round(Number(t.value)||0)),d=S.volDate;t.value=n||'';
     const cur=Number(S.months[d.slice(0,7)]?.vol?.[d]?.[t.dataset.s]?.[t.dataset.c])||0;if(cur===n)return;
     writeMonth(d.slice(0,7),{vol:{[d]:{[t.dataset.s]:{[t.dataset.c]:n}}}});updVolTotals()},
@@ -1208,7 +1316,7 @@ function render(){
   $('banner').innerHTML=b;
   const sx=scrollX,sy2=scrollY;
   const scrollers=[...main.querySelectorAll('.scroll')].map(e=>e.scrollLeft);
-  main.innerHTML=({dash:vDash,tasks:vTasks,att:vAtt,vol:vVol,stats:vStats,ach:vAch,set:vSet}[S.view]||vDash)();
+  main.innerHTML=({dash:vDash,tasks:vTasks,att:vAtt,vol:vVol,stats:vStats,ana:vAna,ach:vAch,set:vSet}[S.view]||vDash)();
   main.querySelectorAll('.scroll').forEach((e,i)=>{if(scrollers[i])e.scrollLeft=scrollers[i]});
   if(scrollY!==sy2)window.scrollTo(sx,sy2);
 }
