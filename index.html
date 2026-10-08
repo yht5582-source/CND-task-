@@ -313,7 +313,9 @@ const main=$('main'),menu=$('menu'),modal=$('modal');
 /* ---------- 推導 ---------- */
 const staffList=()=>Object.values(S.staff).sort((a,b)=>(a.order??99)-(b.order??99)||String(a.name).localeCompare(String(b.name),'zh-Hant'));
 const isActiveOn=(s,d)=>!(s.since&&d<s.since)&&!(s.until&&d>s.until);
-const activeOn=d=>staffList().filter(s=>isActiveOn(s,d));
+// 主任只保留管理功能：不列入出勤、業務量、人員動態、統計與任務指派
+const crew=()=>staffList().filter(s=>s.role!=='主任');
+const activeOn=d=>crew().filter(s=>isActiveOn(s,d));
 const rangeActive=(s,f,t)=>!(s.since&&s.since>t)&&!(s.until&&s.until<f);
 const defCode=d=>isWE(d)?'O':'P';
 const att=(d,sid)=>S.atts[d.slice(0,7)]?.days?.[d]?.[sid]||defCode(d);
@@ -639,7 +641,7 @@ function vDash(){
 
   // 週出勤 + 需要注意
   const w=dow(d),mon=addDays(d,w===0?-6:1-w),wk=[...Array(7)].map((_,i)=>addDays(mon,i));
-  const wkStaff=staffList().filter(s=>wk.some(x=>isActiveOn(s,x)));
+  const wkStaff=crew().filter(s=>wk.some(x=>isActiveOn(s,x)));
   let g=`<section class="panel"><div class="ph"><h2>本週出勤</h2><span class="hint">${md(wk[0])} – ${md(wk[6])}</span></div><div class="pb scroll"><table class="ag"><thead><tr><th class="first">人員</th>`;
   g+=wk.map(x=>`<th class="${isWE(x)?'we':''} ${x===TODAY?'today':''}"><button class="dh" data-act="dayMenu" data-d="${x}" ${dis(P.schedule())}><b>${+x.slice(8)}</b>${wd(x)}</button></th>`).join('')+`</tr></thead><tbody>`;
   g+=wkStaff.map(s=>`<tr><td class="first">${esc(s.name)}</td>${wk.map(x=>attCell(x,s)).join('')}</tr>`).join('');
@@ -682,7 +684,7 @@ const srcChip=t=>{
   const x=TASK_SRC[t.source];return x?`<span class="chip k-${x.k}">${x.l}</span>`:'<span class="small muted">—</span>';
 };
 function vTasks(){
-  const f=S.tf,people=staffList(),me=myStaffId();
+  const f=S.tf,people=crew(),me=myStaffId();
   let h=`<div class="bar">
     <select class="field" data-chg="tfWho" id="tfWho" aria-label="負責人">
       <option value="all">全部人員</option>
@@ -739,7 +741,7 @@ function openTask(id,preset={}){
   const t=id?S.tasks[id]:{id:'',title:'',staffId:lead?(preset.staffId||''):me,source:lead?'assigned':'self',cat:lead?'臨床':'研究',status:'todo',start:TODAY,due:'',doneDate:'',note:'',outcome:''};
   if(!t)return;
   const can=(id?P.editTask(t):P.newTask())&&S.canWrite,d=can?'':'disabled';
-  const people=staffList().filter(s=>!(s.until&&s.until<TODAY)||s.id===t.staffId);
+  const people=crew().filter(s=>!(s.until&&s.until<TODAY)||s.id===t.staffId);
   const whoField=lead
     ?`<label>負責營養師<select class="field" id="f_staff" ${d}><option value="">開放認領（未指派）</option>${people.map(s=>`<option value="${s.id}" ${t.staffId===s.id?'selected':''}>${esc(s.name)}</option>`).join('')}</select></label>
       <div class="full"><div class="small" style="color:var(--ink-2);margin-bottom:4px">來源（選了負責人才適用）</div><div class="checks">${[['assigned','指派（組長交辦）'],['claimed','自選・認領開放任務'],['self','自選・自行提出']].map(([k,l])=>`<label><input type="radio" name="f_src" value="${k}" ${(t.source||'assigned')===k?'checked':''} ${d}>${l}</label>`).join('')}</div></div>`
@@ -788,7 +790,7 @@ function closeModal(){modal.hidden=true;modal.innerHTML=''}
 function vAtt(){
   const m=S.attMonth,end=monthEnd(m),n=+end.slice(8);
   const days=[...Array(n)].map((_,i)=>`${m}-${pad(i+1)}`);
-  const list=staffList().filter(s=>rangeActive(s,days[0],end));
+  const list=crew().filter(s=>rangeActive(s,days[0],end));
   let h=`<div class="bar"><button class="btn icon" data-act="attShift" data-n="-1" aria-label="上個月">‹</button><span class="datebig" style="min-width:auto;text-align:center">${m.slice(0,4)} 年 ${+m.slice(5)} 月</span><button class="btn icon" data-act="attShift" data-n="1" aria-label="下個月">›</button><button class="btn" data-act="attThis" ${m===TODAY.slice(0,7)?'disabled':''}>本月</button><span class="grow"></span><span class="small muted">${P.schedule()?'點格子改單人；點日期可一次設定全員（例如國定假日）':'出勤由組長安排，此處僅供查看'}</span></div>`;
   if(!list.length)return h+emptyStaff();
   h+=vLeave();
@@ -819,7 +821,7 @@ function vLeave(){
   const done=all.filter(l=>l.status!=='pending').sort((a,b)=>(b.decidedAt||b.created||'')<(a.decidedAt||a.created||'')?-1:1).slice(0,lead?12:8);
   if(!me&&!lead)return '';
   let h=`<section class="panel"><div class="ph"><h2>請假申請</h2><span class="hint">${lead?'核准後自動寫入下方出勤表（只寫原本要上班的日子）':'送出後由組長核准，核准後自動寫入出勤表'}</span></div><div class="pb">`;
-  if(me){
+  if(me&&myStaff()?.role!=='主任'){
     h+=`<form id="leaveForm" class="bar" style="margin-bottom:14px">
       <select class="field" id="lvCode" aria-label="假別" ${ro()}>${LEAVE_CODES.map(c=>`<option value="${c}">${ATT[c].l}</option>`).join('')}</select>
       <input type="date" class="field" id="lvFrom" value="${TODAY}" aria-label="起日" ${ro()}><span class="muted">至</span><input type="date" class="field" id="lvTo" value="${TODAY}" aria-label="迄日" ${ro()}>
@@ -879,7 +881,7 @@ function vVol(){
   }
   h+=`</tbody><tfoot><tr><td colspan="2">合計</td>${S.cats.map(c=>`<td class="num" data-ct="${c.id}">${colT[c.id]||0}</td>`).join('')}<td class="num" data-gt>${g}</td></tr></tfoot></table></div></section>`;
   // 月累計
-  const f=m+'-01',e=monthEnd(m),agg=volAgg(f,e),ml=staffList().filter(s=>rangeActive(s,f,e));
+  const f=m+'-01',e=monthEnd(m),agg=volAgg(f,e),ml=crew().filter(s=>rangeActive(s,f,e));
   h+=`<section class="panel"><div class="ph"><h2>${+m.slice(5)} 月累計</h2><button class="link small" data-act="goStats">到統計報表看任意期間 →</button></div><div class="scroll"><table class="tbl"><thead><tr><th>營養師</th>${S.cats.map(c=>`<th class="num">${esc(c.name)}</th>`).join('')}<th class="num">合計</th><th class="num">出勤日</th><th class="num">日均</th></tr></thead><tbody>`;
   for(const s of ml){const b=agg.by[s.id]||{total:0},w=attAgg(s,f,e).work;
     h+=`<tr><td><b>${esc(s.name)}</b></td>${S.cats.map(c=>`<td class="num">${b[c.id]||'<span class="zero">0</span>'}</td>`).join('')}<td class="num"><b>${b.total}</b></td><td class="num">${nf(w)}</td><td class="num">${w?nf(Math.round(b.total/w*10)/10):'–'}</td></tr>`}
@@ -894,7 +896,7 @@ function updVolTotals(){
 
 /* ---------- 統計報表 ---------- */
 function statsData(){
-  const f=S.rFrom,t=S.rTo,list=staffList().filter(s=>rangeActive(s,f,t)),va=volAgg(f,t);
+  const f=S.rFrom,t=S.rTo,list=crew().filter(s=>rangeActive(s,f,t)),va=volAgg(f,t);
   const done=tasksArr().filter(x=>x.status==='done'&&x.doneDate&&x.doneDate>=f&&x.doneDate<=t);
   const rows=list.map(s=>{const a=attAgg(s,f,t),v=va.by[s.id]||{total:0};return{s,a,v,done:done.filter(x=>x.staffId===s.id),open:tasksArr().filter(x=>x.staffId===s.id&&x.status!=='done'),over:tasksArr().filter(x=>x.staffId===s.id&&isOverdue(x))}});
   return{f,t,list,va,done,rows};
@@ -1014,7 +1016,7 @@ function vAna(){
   const presets=[['all','全部期間'],['year','今年'],['quarter','本季'],['month','本月'],['lastmonth','上月']];
   let h=`<div class="bar">
     <select class="field" id="anaTaskSel" data-chg="anaTaskSel" aria-label="任務項目" style="max-width:20em"><option value="">全部任務項目</option>${titles.map(x=>`<option value="${esc(x)}" ${A.task===x?'selected':''}>${esc(x)}${cnt[x]>1?`（${cnt[x]} 次）`:''}</option>`).join('')}</select>
-    <select class="field" id="anaWhoSel" data-chg="anaWhoSel" aria-label="負責人"><option value="">全部負責人</option>${staffList().map(s=>`<option value="${s.id}" ${A.who===s.id?'selected':''}>${esc(s.name)}${s.until&&s.until<TODAY?'（已離職）':''}</option>`).join('')}</select>
+    <select class="field" id="anaWhoSel" data-chg="anaWhoSel" aria-label="負責人"><option value="">全部負責人</option>${crew().map(s=>`<option value="${s.id}" ${A.who===s.id?'selected':''}>${esc(s.name)}${s.until&&s.until<TODAY?'（已離職）':''}</option>`).join('')}</select>
     <div class="seg" role="group" aria-label="期間">${presets.map(([k,l])=>`<button data-act="anaPreset" data-v="${k}" aria-pressed="${A.rp===k}">${l}</button>`).join('')}</div>
     <input type="date" class="field" id="anaFrom" data-chg="anaFrom" value="${A.from}" aria-label="起日"><span class="muted">至</span><input type="date" class="field" id="anaTo" data-chg="anaTo" value="${A.to}" aria-label="迄日">
     <span class="grow"></span>${A.task||A.who||A.rp!=='all'?`<button class="btn" data-act="anaClear">清除篩選</button>`:''}<button class="btn" data-act="exportAna">匯出 CSV</button></div>`;
@@ -1069,7 +1071,7 @@ function rangeBar(exportAct){
 function achData(){
   const f=S.rFrom,t=S.rTo;
   const inRange=x=>x.status==='done'?(x.doneDate>=f&&x.doneDate<=t):((x.start||x.created||'')<=t);
-  const rows=staffList().filter(s=>rangeActive(s,f,t)).map(s=>{
+  const rows=crew().filter(s=>rangeActive(s,f,t)).map(s=>{
     const mine=tasksArr().filter(x=>x.staffId===s.id&&inRange(x));
     const vol=mine.filter(isVoluntary).sort((a,b)=>(a.status==='done')!==(b.status==='done')?(a.status==='done'?-1:1):((a.doneDate||a.start||'')<(b.doneDate||b.start||'')?1:-1));
     const asg=mine.filter(x=>!isVoluntary(x)&&x.status==='done').sort((a,b)=>a.doneDate<b.doneDate?1:-1);
