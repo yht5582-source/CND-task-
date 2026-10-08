@@ -327,10 +327,11 @@ const dis=ok=>ok&&S.canWrite?'':'disabled';
 /* ---------- 身分與權限 ----------
    主任＝資料庫規則中指定的信箱（首次登入時自行建立 roles 文件）；組長／營養師＝ roles/{email} 文件（由人員名單的電子郵件自動產生）。
    實際權限由 firestore.rules 把關，這裡只決定畫面上顯示哪些按鈕。 */
+const LEADS=['主任','組長'];   // 主任與組長都有管理權限；只有主任能指定別人為主任
 const myStaffId=()=>{const r=S.myRole;return r&&S.staff[r.staffId]?r.staffId:null};
 const myStaff=()=>S.staff[myStaffId()]||null;
 const P={
-  lead:()=>S.me.owner||S.myRole?.role==='組長',
+  lead:()=>S.me.owner||LEADS.includes(S.myRole?.role),
   schedule:()=>P.lead(),
   manage:()=>P.lead(),
   editTask:t=>P.lead()||(!!myStaffId()&&t.staffId===myStaffId()),
@@ -343,7 +344,7 @@ function roleLabel(){
   if(S.auth!=='in')return '';
   if(S.me.owner)return '主任';
   const s=myStaff();
-  if(s)return `${s.role==='組長'?'組長':'營養師'}・${s.name}`;
+  if(s)return `${s.role||'營養師'}・${s.name}`;
   return S.me.email;
 }
 
@@ -422,7 +423,7 @@ function writeAtt(m,patch){
 }
 /* 站內通知：to = 營養師 id，或 'lead'（主任與組長都會收到） */
 const meKey=()=>S.me.uid||'local';
-const actorName=()=>{const s=myStaff();return s?`${s.role==='組長'?'組長':''}${s.name}`:S.me.owner?'主任':'管理者'};
+const actorName=()=>{const s=myStaff();return s?`${LEADS.includes(s.role)?s.role:''}${s.name}`:S.me.owner?'主任':'管理者'};
 function notify(to,text,kind,ref){
   if(!to)return;
   const id='n'+uid(),n={to,text,kind,ref:ref||'',created:new Date().toISOString(),readBy:{}};
@@ -539,7 +540,7 @@ function syncRole(prev,s){
   const oldE=roleKey(prev?.email),newE=roleKey(s.email),active=!(s.until&&s.until<TODAY);
   if(oldE&&oldE!==newE)enqueue('roles/'+oldE,()=>db.doc('roles/'+oldE).delete());
   if(!newE)return;
-  if(active)enqueue('roles/'+newE,()=>db.doc('roles/'+newE).set({role:s.role==='組長'?'組長':'營養師',staffId:s.id,name:s.name}));
+  if(active)enqueue('roles/'+newE,()=>db.doc('roles/'+newE).set({role:LEADS.includes(s.role)?s.role:'營養師',staffId:s.id,name:s.name}));
   else enqueue('roles/'+newE,()=>db.doc('roles/'+newE).delete());
 }
 const SEED_TASKS=[
@@ -573,7 +574,7 @@ function saveCats(cats){
 /* ---------- 共用元件 ---------- */
 const kpi=(label,val,sub,cls='')=>`<div class="kpi ${cls}"><div class="kl">${label}</div><div class="kv">${val}</div><div class="ks">${sub||''}</div></div>`;
 const stChip=st=>{const x=TASK_ST[st]||TASK_ST.todo;return `<span class="chip k-${x.k}">${x.l}</span>`};
-const roleTag=s=>`<span class="role ${s.role==='組長'?'':'plain'}">${esc(s.role||'營養師')}</span>`;
+const roleTag=s=>`<span class="role ${LEADS.includes(s.role)?'':'plain'}">${esc(s.role||'營養師')}</span>`;
 function attBtn(d,s,cls='chip'){
   const c=att(d,s.id),a=ATT[c]||ATT.P;
   return `<button class="${cls} k-${a.k}" data-act="attMenu" data-d="${d}" data-s="${s.id}" ${dis(P.schedule())} aria-label="${esc(s.name)} ${d} ${a.l}，點選修改">${a.l}</button>`;
@@ -1131,7 +1132,7 @@ function vSet(){
   for(const s of list){
     const gone=s.until&&s.until<TODAY,rk=roleKey(s.email),ok=rk&&S.roles[rk]&&S.roles[rk].staffId===s.id;
     h+=`<tr class="set-row"><td><input class="field" id="sn_${s.id}" data-chg="staff" data-s="${s.id}" data-f="name" value="${esc(s.name)}" maxlength="20" ${dis(mg)} style="min-width:7em"></td>
-    <td><select class="field" id="sr_${s.id}" data-chg="staff" data-s="${s.id}" data-f="role" ${dis(mg)}>${['組長','營養師'].map(r=>`<option ${s.role===r?'selected':''}>${r}</option>`).join('')}</select></td>
+    <td><select class="field" id="sr_${s.id}" data-chg="staff" data-s="${s.id}" data-f="role" ${dis(mg&&(S.me.owner||s.role!=='主任'))}>${(S.me.owner||s.role==='主任'?['主任','組長','營養師']:['組長','營養師']).map(r=>`<option ${s.role===r?'selected':''}>${r}</option>`).join('')}</select></td>
     <td><input type="email" class="field" id="se_${s.id}" data-chg="staff" data-s="${s.id}" data-f="email" value="${esc(s.email||'')}" placeholder="name@hospital.org" maxlength="80" ${dis(mg)} style="min-width:15em"></td>
     <td><input type="date" class="field" id="ss_${s.id}" data-chg="staff" data-s="${s.id}" data-f="since" value="${s.since||''}" ${dis(mg)}></td>
     <td><input type="date" class="field" id="su_${s.id}" data-chg="staff" data-s="${s.id}" data-f="until" value="${s.until||''}" ${dis(mg)}></td>
